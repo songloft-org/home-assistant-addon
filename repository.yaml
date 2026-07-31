@@ -1,0 +1,15 @@
+# Home Assistant 加载项仓库清单 / Home Assistant add-on repository manifest.
+#
+# 【不要移动到子目录】HA Supervisor 只在 git 仓库【根目录】查找
+# repository.{yaml,yml,json}（supervisor/store/repository.py 的 RepositoryGit.validate），
+# 找不到就报 "is not a valid app repository" 并删掉刚 clone 的仓库。
+# 本仓库正是为此从 songloft-org/songloft 的 addon/ 子目录拆出来的（songloft-org/songloft#340）。
+# 加载项本体在 songloft/，由 Supervisor 的递归 glob "**/config.*" 发现
+# （supervisor/store/data.py 的 _find_app_configs）。
+#
+# DO NOT move this file into a subdirectory: HA Supervisor looks for
+# repository.{yaml,yml,json} only at the git repository ROOT. The add-on itself
+# lives in songloft/ and is discovered via a recursive "**/config.*" glob.
+name: Songloft Add-ons
+url: https://github.com/songloft-org/home-assistant-addon
+maintainer: Songloft <https://github.com/songloft-org>

@@ -1,0 +1,117 @@
+name: Sync add-on version
+
+# 从主仓库 songloft-org/songloft 的「最新正式版」拉取版本号，同步到本仓库的
+# songloft/config.yaml（version）与 songloft/build.yaml（base image tag）。
+#
+# 【为什么是本仓库「拉」而不是主仓库「推」】跨仓库 push 需要 PAT 并长期维护它的过期；
+# 反向拉取只需要本仓库自己的 GITHUB_TOKEN，零密钥、零跨仓库配置。代价是最长 6 小时
+# 延迟，对「HA 商店显示有可用更新」这个场景完全可接受（HA 侧 store 刷新本来也不实时）。
+#
+# 【为什么 releases/latest 拿到的一定是正式版】该端点的语义是「最新的非 draft、非
+# prerelease release」。主仓库的 dev 构建创建 release 时带 --prerelease，正式发布带
+# --latest（见主仓库 .github/workflows/release.yml 的 Create GitHub Release step），双重保证。
+#
+# 【为什么 base image tag 一定已存在于 Docker Hub】主仓库 create-release job 的 needs
+# 包含 docker-build-push，release 出现时多架构 manifest 已推送完毕。下面仍加了
+# docker manifest inspect 兜底，防「release 存在但镜像推送失败」的极端情况。
+
+on:
+  schedule:
+    # 每 6 小时一次。分钟数刻意避开 0/30 —— 那两个刻度上全球 Actions 排队最凶。
+    # 注：GitHub 会停用「60 天无活动的公开仓库」的 schedule，届时用下面的
+    # workflow_dispatch 手动跑一次即可恢复。
+    - cron: '17 */6 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+# 定时与手动触发可能撞车，串行执行避免两个 job 同时 push 打架。
+concurrency:
+  group: sync-version
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve upstream latest stable version
+        id: upstream
+        env:
+          # 带鉴权的 API 速率限制是 5000/h；匿名只有 60/h 且按 runner 出口 IP 共享，
+          # 在 Actions 上极易被别人耗尽。GITHUB_TOKEN 对公开仓库有读权限。
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          TAG="$(gh api repos/songloft-org/songloft/releases/latest --jq '.tag_name')"
+          VERSION="${TAG#v}"
+
+          if [ -z "$VERSION" ] || [ "$VERSION" = "null" ]; then
+            echo "::error::无法解析主仓库最新正式版 tag（拿到 '${TAG}'）"
+            exit 1
+          fi
+
+          # 形态守卫：只接受 X.Y.Z。万一拿到 dev 或其它异常 tag，宁可整个 job 失败，
+          # 也绝不能让 build.yaml 指向一个不存在的 base image tag ——
+          # 那会让【所有】HA 用户装不上加载项。
+          if ! printf '%s' "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::版本号形态异常：'${VERSION}'"
+            exit 1
+          fi
+
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+
+      - name: Sync version into config.yaml / build.yaml
+        env:
+          VERSION: ${{ steps.upstream.outputs.version }}
+        run: |
+          set -euo pipefail
+
+          CURRENT="$(grep -m1 '^version:' songloft/config.yaml \
+                     | sed -e 's/^version:[[:space:]]*//' -e 's/^"//' -e 's/"$//')"
+          echo "current=${CURRENT} upstream=${VERSION}"
+
+          if [ "$CURRENT" = "$VERSION" ]; then
+            echo "版本一致，无需同步"
+            exit 0
+          fi
+
+          # 只允许版本号向前。主仓库重跑同一个 tag 时会先 gh release delete 再 create，
+          # 在那个窗口里 releases/latest 会短暂回落到上一个正式版；没有这道守卫就会
+          # 先把版本号写回旧值、下一轮再写回来，产生两次无意义 commit，
+          # 还会让 HA 端短暂显示「有可用更新」指向旧版本。
+          NEWEST="$(printf '%s\n%s\n' "$CURRENT" "$VERSION" | sort -V | tail -n1)"
+          if [ "$NEWEST" != "$VERSION" ]; then
+            echo "上游 ${VERSION} 不高于当前 ${CURRENT}，跳过（疑似 release 重建窗口期）"
+            exit 0
+          fi
+
+          # 兜底：确认该 tag 的多架构 manifest 真的在 Docker Hub 上。
+          # 匿名拉 manifest 无需登录；拉不到就说明镜像没推成功，此时同步版本号
+          # 只会让用户装不上，不如原地失败等下一轮。
+          if ! docker manifest inspect "songloft/songloft:${VERSION}" > /dev/null 2>&1; then
+            echo "::error::songloft/songloft:${VERSION} 在 Docker Hub 上不可用，跳过同步"
+            exit 1
+          fi
+
+          sed -i "s/^version:.*/version: \"${VERSION}\"/" songloft/config.yaml
+          sed -i "s#songloft/songloft:[^\"[:space:]]*#songloft/songloft:${VERSION}#g" songloft/build.yaml
+
+          # 幂等守卫：sed 什么都没改到就绝不产生空 commit
+          if git diff --quiet -- songloft/config.yaml songloft/build.yaml; then
+            echo "文件无变更，跳过 commit"
+            exit 0
+          fi
+
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add songloft/config.yaml songloft/build.yaml
+          git commit -m "chore: sync add-on version to ${VERSION}"
+          git push origin HEAD:main
+
+      - name: Show result
+        run: |
+          grep -n '^version:' songloft/config.yaml
+          grep -n 'songloft/songloft:' songloft/build.yaml

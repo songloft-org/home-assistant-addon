@@ -1,0 +1,16 @@
+# 本地验证残留（见 README「本地验证」一节）
+/tmp/
+*.tar
+*.log
+
+# 编辑器 / 系统
+.DS_Store
+*.swp
+.idea/
+.vscode/
+
+# ⚠ 注意：这里【不能】用忽略来解决 config.* 误识别问题。
+# Supervisor 用递归 glob "**/config.*" 发现加载项（只跳过以 . 开头的路径段和 rootfs），
+# 它看的是 clone 下来的工作区，不看 .gitignore。所以本仓库【绝不能新增】任何
+# 非点号目录下的 config.yaml / config.yml / config.json，否则会被认成第二个加载项。
+# .github/ 下的 config.yml 安全（以 . 开头，被 glob 跳过）。
